@@ -33,11 +33,12 @@ enum Metrics {
     static let maxRows: CGFloat = 5
     static let gap: CGFloat = 10
 
-    static func cardHeight(count: Int) -> CGFloat {
+    static func cardHeight(count: Int, extraDivider: Bool = false) -> CGFloat {
         if count == 0 { return header + 72 }
         let rows = min(CGFloat(count), maxRows) * rowHeight
         let footer = count >= 2 ? footerWithAll : footerBase
-        return header + rows + footer
+        let divider: CGFloat = count > 0 && extraDivider ? 16 : 0
+        return header + rows + divider + footer
     }
 }
 
@@ -184,6 +185,8 @@ final class ShelfController: NSObject {
     private var animToken = 0
     private var hideToken = 0
     private var displayedCount = 0
+    var notice: String?
+    var onSaveScreenshot: ((StagedItem) -> Void)?
     private var dragOriginCenter = CGPoint.zero
     private var dragOriginMouse = CGPoint.zero
     private var didMove = false
@@ -217,7 +220,7 @@ final class ShelfController: NSObject {
         panel.isMovableByWindowBackground = false
         panel.collectionBehavior = [.canJoinAllSpaces, .fullScreenAuxiliary, .ignoresCycle]
         panel.title = "中转球"
-        panel.sharingType = .none
+        panel.sharingType = .readOnly
         panel.acceptsMouseMovedEvents = true
         root.addSubview(card)
         root.addSubview(ball)
@@ -290,9 +293,11 @@ final class ShelfController: NSObject {
         displayedCount = count
         ball.count = count
         ball.isImporting = store.isImporting
-        card.update(items: store.items, error: store.lastError) { [weak store] id in
+        card.update(items: store.items, error: store.lastError, notice: notice, onRemove: { [weak store] id in
             store?.remove(id: id)
-        }
+        }, onSave: { [weak self] item in
+            self?.onSaveScreenshot?(item)
+        })
         if panel.isVisible {
             applyPlacement()
             if store.lastError != nil && !isExpanded {
@@ -443,7 +448,7 @@ final class ShelfController: NSObject {
         if isExpanded {
             let screen = (screenContaining(ballCenter) ?? NSScreen.main)?.visibleFrame
                 ?? NSRect(x: 0, y: 0, width: 1280, height: 800)
-            let size = NSSize(width: Metrics.cardWidth, height: Metrics.cardHeight(count: store.items.count))
+            let size = NSSize(width: Metrics.cardWidth, height: Metrics.cardHeight(count: store.items.count, extraDivider: store.separatesScreenshots))
             var cardX = ballCenter.x - size.width / 2
             cardX = min(max(cardX, screen.minX + 8), max(screen.minX + 8, screen.maxX - size.width - 8))
             let above = ballScreen.maxY + Metrics.gap
@@ -788,17 +793,20 @@ final class CardView: NSView {
 
     override var mouseDownCanMoveWindow: Bool { false }
 
-    func update(items: [StagedItem], error: String?, onRemove: @escaping (UUID) -> Void) {
+    func update(items: [StagedItem], error: String?, notice: String?, onRemove: @escaping (UUID) -> Void, onSave: @escaping (StagedItem) -> Void) {
         itemCount = items.count
         countLabel.stringValue = items.isEmpty ? "" : "\(items.count) 项"
         if let error {
             subtitle.stringValue = error
             subtitle.textColor = .systemRed
+        } else if let notice {
+            subtitle.stringValue = notice
+            subtitle.textColor = .systemGreen
         } else {
             subtitle.stringValue = "按住文件拖到目标位置。关闭开关只清空副本，不删除原文件。"
             subtitle.textColor = .secondaryLabelColor
         }
-        list.reload(items: items, onRemove: onRemove)
+        list.reload(items: items, onRemove: onRemove, onSave: onSave)
         dragAll.files = items
         needsLayout = true
     }
@@ -835,24 +843,38 @@ final class CardView: NSView {
 final class ListDocument: NSView {
     override var isFlipped: Bool { true }
 
-    func reload(items: [StagedItem], onRemove: @escaping (UUID) -> Void) {
+    func reload(items: [StagedItem], onRemove: @escaping (UUID) -> Void, onSave: @escaping (StagedItem) -> Void) {
         subviews.forEach { $0.removeFromSuperview() }
-        for item in items {
+        let shots = items.filter(\.isScreenshot)
+        let files = items.filter { !$0.isScreenshot }
+        let ordered = shots + files
+        let split = !shots.isEmpty && !files.isEmpty
+        for item in ordered {
+            if split && item.id == files.first?.id {
+                addSubview(SectionDivider())
+            }
             let row = FileRowView(item: item)
             row.onRemove = { onRemove(item.id) }
+            if item.isScreenshot {
+                row.onSave = { onSave(item) }
+            }
             addSubview(row)
         }
-        let height = max(CGFloat(items.count) * Metrics.rowHeight, 1)
-        frame.size.height = height
+        frame.size.height = max(contentHeight, 1)
         needsLayout = true
+    }
+
+    private var contentHeight: CGFloat {
+        subviews.reduce(0) { $0 + ($1 is SectionDivider ? 16 : Metrics.rowHeight) }
     }
 
     override func layout() {
         super.layout()
         var y: CGFloat = 0
         for view in subviews {
-            view.frame = NSRect(x: 0, y: y, width: bounds.width, height: Metrics.rowHeight)
-            y += Metrics.rowHeight
+            let height: CGFloat = view is SectionDivider ? 16 : Metrics.rowHeight
+            view.frame = NSRect(x: 0, y: y, width: bounds.width, height: height)
+            y += height
         }
     }
 }
@@ -916,9 +938,22 @@ class FileDragView: NSView, NSDraggingSource {
     }
 }
 
+final class SectionDivider: NSView {
+    override func draw(_ dirtyRect: NSRect) {
+        NSColor.separatorColor.setStroke()
+        let path = NSBezierPath()
+        path.move(to: NSPoint(x: 14, y: bounds.midY))
+        path.line(to: NSPoint(x: bounds.width - 14, y: bounds.midY))
+        path.lineWidth = 1
+        path.stroke()
+    }
+}
+
 final class FileRowView: FileDragView {
     var onRemove: (() -> Void)?
+    var onSave: (() -> Void)?
     private let item: StagedItem
+    private let saveButton = NSButton()
     private let iconView = NSImageView()
     private let nameField = NSTextField(labelWithString: "")
     private let detailField = NSTextField(labelWithString: "")
@@ -948,6 +983,16 @@ final class FileRowView: FileDragView {
         removeButton.toolTip = "从中转区移除"
         removeButton.alphaValue = 0.55
         toolTip = item.displayName
+        if item.isScreenshot {
+            saveButton.isBordered = false
+            saveButton.image = NSImage(systemSymbolName: "square.and.arrow.down", accessibilityDescription: "保存到文件夹")?
+                .withSymbolConfiguration(.init(pointSize: 13, weight: .medium))
+            saveButton.contentTintColor = .controlAccentColor
+            saveButton.target = self
+            saveButton.action = #selector(saveItem)
+            saveButton.toolTip = "保存到指定文件夹"
+            addSubview(saveButton)
+        }
         addSubview(iconView)
         addSubview(nameField)
         addSubview(detailField)
@@ -963,6 +1008,10 @@ final class FileRowView: FileDragView {
         guard bounds.contains(local) else { return nil }
         let buttonPoint = removeButton.convert(local, from: self)
         if removeButton.bounds.insetBy(dx: -4, dy: -4).contains(buttonPoint) { return removeButton }
+        if item.isScreenshot {
+            let savePoint = saveButton.convert(local, from: self)
+            if saveButton.bounds.insetBy(dx: -4, dy: -4).contains(savePoint) { return saveButton }
+        }
         return self
     }
 
@@ -970,7 +1019,11 @@ final class FileRowView: FileDragView {
         super.layout()
         iconView.frame = NSRect(x: 8, y: 9, width: 28, height: 28)
         removeButton.frame = NSRect(x: bounds.width - 30, y: 12, width: 22, height: 22)
-        let textWidth = max(0, bounds.width - 46 - 36)
+        let textReserve: CGFloat = item.isScreenshot ? 62 : 36
+        if item.isScreenshot {
+            saveButton.frame = NSRect(x: bounds.width - 54, y: 12, width: 22, height: 22)
+        }
+        let textWidth = max(0, bounds.width - 46 - textReserve)
         nameField.frame = NSRect(x: 44, y: 24, width: textWidth, height: 16)
         detailField.frame = NSRect(x: 44, y: 6, width: textWidth, height: 14)
     }
@@ -992,6 +1045,7 @@ final class FileRowView: FileDragView {
     override func mouseExited(with event: NSEvent) { hovered = false }
 
     @objc private func removeItem() { onRemove?() }
+    @objc private func saveItem() { onSave?() }
 
     private static let bytes: ByteCountFormatter = {
         let formatter = ByteCountFormatter()

@@ -66,7 +66,7 @@ enum TransferBallMain {
             print("中转球：菜单栏文件临时中转。打开应用后，点击菜单栏开关使用。")
             return
         }
-        let running = NSRunningApplication.runningApplications(withBundleIdentifier: "com.wcy.transferball")
+        let running = NSRunningApplication.runningApplications(withBundleIdentifier: "com.wcy.transferball.v2")
         if running.contains(where: { $0.processIdentifier != getpid() }) {
             return
         }
@@ -85,12 +85,23 @@ final class AppDelegate: NSObject, NSApplicationDelegate, StagingStoreDelegate {
     private var isOn = false
     private var lastCount = 0
     private var showingMenu = false
+    private var notice: String?
+    private let regionHotkey = RegionHotkey()
+    private var capturing = false
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         store.delegate = self
         shelf = ShelfController(store: store)
         configureStatusItem()
         configureMainMenu()
+        shelf.onSaveScreenshot = { [weak self] item in
+            self?.saveScreenshot(item)
+        }
+        regionHotkey.onFire = { [weak self] in
+            self?.captureRegion()
+        }
+        regionHotkey.registerCurrent()
+        turnOn()
     }
 
     func applicationWillTerminate(_ notification: Notification) {
@@ -100,6 +111,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, StagingStoreDelegate {
     func stagingStoreDidChange(_ store: StagingStore) {
         let shouldPulse = store.items.count > lastCount && isOn
         lastCount = store.items.count
+        shelf.notice = notice
         shelf.sync(pulse: shouldPulse)
         updateStatusItem()
     }
@@ -173,6 +185,70 @@ final class AppDelegate: NSObject, NSApplicationDelegate, StagingStoreDelegate {
         return item
     }
 
+    @objc private func editShortcut() {
+        regionHotkey.unregister()
+        let panel = ShortcutCaptureWindow()
+        panel.onCapture = { [weak self] event in
+            ShotShortcut.store(event: event)
+            self?.regionHotkey.registerCurrent()
+        }
+        panel.onCancel = { [weak self] in
+            self?.regionHotkey.registerCurrent()
+        }
+        panel.center()
+        panel.makeKeyAndOrderFront(nil)
+        NSApp.activate(ignoringOtherApps: true)
+    }
+
+    @objc private func chooseScreenshotFolder() {
+        _ = ScreenshotFolder.choose()
+    }
+
+    private func saveScreenshot(_ item: StagedItem) {
+        if ScreenshotFolder.resolvedURL() == nil {
+            guard ScreenshotFolder.choose() != nil else { return }
+        }
+        if let folder = ScreenshotFolder.save(item) {
+            showNotice("已保存到「\(folder)」")
+        } else {
+            showNotice("保存失败")
+        }
+    }
+
+    private func captureRegion() {
+        guard !capturing else { return }
+        capturing = true
+        RegionCapture.grab { [weak self] url, problem in
+            guard let self else { return }
+            self.capturing = false
+            if let problem {
+                if !self.isOn { self.turnOn() }
+                self.showNotice(problem)
+                return
+            }
+            guard let url else { return }
+            defer { try? FileManager.default.removeItem(at: url) }
+            if !self.isOn { self.turnOn() }
+            _ = self.store.importScreenshot(at: url)
+            if let error = self.store.lastError {
+                self.showNotice(error)
+            }
+            self.shelf.show(expanded: true, animated: true)
+        }
+    }
+
+    private func showNotice(_ text: String) {
+        notice = text
+        shelf.notice = text
+        shelf.sync(pulse: false)
+        DispatchQueue.main.asyncAfter(deadline: .now() + 2) { [weak self] in
+            guard let self, self.notice == text else { return }
+            self.notice = nil
+            self.shelf.notice = nil
+            self.shelf.sync(pulse: false)
+        }
+    }
+
     private func turnOn() {
         guard !isOn else { return }
         isOn = true
@@ -217,6 +293,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate, StagingStoreDelegate {
         menu.addItem(.separator())
         menu.addItem(styleMenu(title: "悬浮球大小", options: BallStyle.sizeOptions.map { ($0.title, Int($0.value)) }, current: Int(BallStyle.size), action: #selector(chooseSize(_:))))
         menu.addItem(styleMenu(title: "透明程度", options: BallStyle.opacityOptions, current: Int((BallStyle.opacity * 100).rounded()), action: #selector(chooseOpacity(_:))))
+        let shortcut = NSMenuItem(title: "截屏快捷键：\(ShotShortcut.label)", action: #selector(editShortcut), keyEquivalent: "")
+        shortcut.target = self
+        menu.addItem(shortcut)
+        let folder = NSMenuItem(title: "截屏保存到：\(ScreenshotFolder.displayName)", action: #selector(chooseScreenshotFolder), keyEquivalent: "")
+        folder.target = self
+        menu.addItem(folder)
         menu.addItem(.separator())
         let toggle = NSMenuItem(title: isOn ? "关闭并清空" : "打开悬浮球", action: #selector(toggleFromMenu), keyEquivalent: "")
         toggle.target = self
@@ -236,5 +318,5 @@ final class AppDelegate: NSObject, NSApplicationDelegate, StagingStoreDelegate {
             button.sendAction(on: [.leftMouseUp, .rightMouseUp])
         }
     }
-
 }
+

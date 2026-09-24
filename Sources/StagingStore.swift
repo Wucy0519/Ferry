@@ -11,6 +11,7 @@ struct StagedItem {
     let displayName: String
     let kind: ItemKind
     let byteCount: Int64?
+    var isScreenshot = false
 }
 
 protocol StagingStoreDelegate: AnyObject {
@@ -35,6 +36,9 @@ final class StagingStore {
 
     private(set) var items: [StagedItem] = []
     private(set) var lastError: String?
+    var separatesScreenshots: Bool {
+        items.contains(where: \.isScreenshot) && items.contains { !$0.isScreenshot }
+    }
     private(set) var isImporting = false
     weak var delegate: StagingStoreDelegate?
 
@@ -135,6 +139,16 @@ final class StagingStore {
         let result = copyFiles(urls, into: currentDirectory(), generation: currentGeneration())
         apply(result.items, error: result.error)
         return result.items
+    }
+
+    @discardableResult
+    func importScreenshot(at url: URL) -> StagedItem? {
+        let result = copyFiles([url], into: currentDirectory(), generation: currentGeneration())
+        let flagged = result.items.map {
+            StagedItem(id: $0.id, url: $0.url, displayName: $0.displayName, kind: $0.kind, byteCount: $0.byteCount, isScreenshot: true)
+        }
+        apply(flagged, error: result.error)
+        return flagged.first
     }
 
     @discardableResult

@@ -6,9 +6,9 @@ SDK="$(xcrun --sdk macosx --show-sdk-path)"
 ARCH="$(uname -m)"
 TARGET="${ARCH}-apple-macosx13.0"
 BUILD="$ROOT/build"
-APP="$ROOT/../中转球.app"
+APP="$ROOT/../中转球v2.app"
 
-killall "中转球" 2>/dev/null || true
+killall "中转球" "中转球v2" 2>/dev/null || true
 
 rm -rf "$BUILD" "$APP"
 mkdir -p "$BUILD/icon.iconset" "$APP/Contents/MacOS" "$APP/Contents/Resources"
@@ -25,14 +25,15 @@ done
 iconutil -c icns "$BUILD/icon.iconset" -o "$APP/Contents/Resources/AppIcon.icns"
 
 swiftc -sdk "$SDK" -target "$TARGET" -O -whole-module-optimization \
-  -framework AppKit -framework QuartzCore \
-  -o "$APP/Contents/MacOS/中转球" \
+  -framework AppKit -framework QuartzCore -framework Carbon -framework ScreenCaptureKit \
+  -o "$APP/Contents/MacOS/中转球v2" \
   "$ROOT/Sources/StagingStore.swift" \
   "$ROOT/Sources/ShelfUI.swift" \
+  "$ROOT/Sources/RegionShot.swift" \
   "$ROOT/Sources/AppMain.swift"
 
 cp "$ROOT/Support/Info.plist" "$APP/Contents/Info.plist"
 codesign --force --sign - "$APP"
 
-"$APP/Contents/MacOS/中转球" --self-test
+"$APP/Contents/MacOS/中转球v2" --self-test
 echo "已生成 $APP"
